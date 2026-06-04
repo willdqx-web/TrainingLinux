@@ -1,297 +1,442 @@
-# Day 4 — ユーザー認証（ログイン・ログアウト・認可）
+# Day 4 — パーミッション・パッケージ管理・Git CLI
 
-## このプロジェクト全体の流れ
+## この研修全体の流れ
 
 ```
-Day 1  → Day 2  → Day 3  → [Day 4]  → Day 5〜7 → Day 8 → Day 9 → Day 10
-Docker   paiza    Django    ログイン    タスク      カテゴリ 検索    提出
-環境構築  学習     初期設定   認証        CRUD
-                  +登録      ★今日
+Day 1  → Day 2  → Day 3  → [Day 4] → Day 5  → Day 6  → Day 7  → Day 8  → Day 9
+ファイル  Vim・    パイプ・  パーミ   gcc/     gdb      Make    CMake   統合
+システム  Bash     プロセス  ッション g++      デバッグ  file           課題
+                            ★今日
 ```
 
-Day 3 でユーザー登録ができるようになりました。今日は「ログイン・ログアウト」と「ログインしていないユーザーへのアクセス制限」を実装し、認証フローを完成させます。
+Day 3 でシェル操作の基本ができました。今日は「Linuxの権限管理（パーミッション）」「パッケージのインストール方法」「コマンドラインでのGit操作」を学びます。特にパーミッションは組み込み開発でデバイスファイルにアクセスする際に必ず必要になる知識です。
 
 ---
 
 ## この日のゴール
 
-- ログインページでユーザー名・パスワードを入力してログインできる
-- ログアウトボタンでセッションが終了する
-- ログインしていないユーザーがタスク一覧（`/tasks/`）にアクセスすると、ログインページにリダイレクトされる
+- `ls -l` のパーミッション表示を読んで意味を説明できる
+- `chmod`, `chown` でファイルの権限を変更できる
+- `sudo` と root の違いを説明できる
+- `apt` でパッケージをインストール・削除できる
+- `git clone`, `add`, `commit`, `push`, `branch`, `checkout` をコマンドラインで実行できる
 
 ---
 
 ## この日の前提
 
-- Day 3 の `feature/user-auth` が main にマージ済みであること
-- ユーザー登録フォームからアカウントを作成できる状態であること
+- Day 3 の作業が完了していること
+- GitHubのアカウントを持っていること（持っていない場合は今日作成する）
 
 ---
 
-## 1. 認証の全体像：セッションとは何か
+## 1. パーミッション（ファイルの権限）
 
-ブラウザとサーバーは「HTTP」でやりとりするが、HTTP はリクエストのたびに「誰が送ったか」を覚えていない。そのために「セッション」を使う。
+### パーミッションとは
+
+Linuxでは**すべてのファイルに「誰が何をできるか」の権限**が設定されている。複数ユーザーが同じシステムを使うため、ファイルへのアクセスを制御する仕組みが必要。
+
+組み込み開発との関連：
+- `/dev/ttyUSB0`（シリアルポート）にアクセスするには適切なグループに属している必要がある
+- ビルド済みの実行ファイルに「実行権限」が必要
+- デバイスドライバの設定ファイルはroot権限が必要
+
+### `ls -l` の読み方
 
 ```
-[ログイン]
-ブラウザ → サーバー：「ユーザー名 + パスワードを送る」
-サーバー → DB：「このユーザーは存在するか？パスワードは正しいか？」
-DB → サーバー：「OK」
-サーバー → ブラウザ：「セッション ID（乱数）を Cookie に保存してね」
-
-[その後のリクエスト]
-ブラウザ → サーバー：「この Cookie のセッション ID が添付されています」
-サーバー：「セッション ID を DB で確認 → ログイン済みと分かる」
+-rw-r--r-- 1 user group 1024 Jan 1 10:00 main.c
+│├────────┘ │ │    │
+││          │ │    └── グループ
+││          │ └── オーナー（所有者）
+││          └── リンク数
+│└── パーミッション（9文字）
+└── ファイルタイプ（- = 通常ファイル、d = ディレクトリ、l = シンボリックリンク）
 ```
 
-**ポイント**：パスワードは最初の1回だけ送る。以降は「セッション ID」というランダムな文字列で認証する。セッション ID を知らない人はログイン状態を偽れない。
+**パーミッションの9文字**
 
----
+```
+rw-  r--  r--
+│     │    └── others（その他のユーザー）の権限
+│     └── group（グループ）の権限
+└── owner（所有者）の権限
 
-## 2. Django の認証フロー
-
-```python
-# authenticate()：ユーザー名とパスワードを照合する
-from django.contrib.auth import authenticate, login
-
-user = authenticate(username='taro', password='pass123')
-# → User オブジェクト（一致した場合）または None（不一致の場合）
-
-# login()：セッションにログイン情報を保存する
-login(request, user)
-# → この後の request.user は taro になる
+r = read（読み取り）
+w = write（書き込み）
+x = execute（実行）
+- = 権限なし
 ```
 
-Django には LoginView・LogoutView というビューが標準で用意されているため、上のコードを自分で書く必要はない。URL に接続するだけで動作する。
+### 数値表記
 
----
+| 権限 | 数値 |
+|------|------|
+| r (read) | 4 |
+| w (write) | 2 |
+| x (execute) | 1 |
+| なし | 0 |
 
-## 3. Django 標準の認証ビュー
+各グループの権限を足し算する：
 
-```python
-from django.contrib.auth import views as auth_views
+| 表記 | 数値 | 意味 |
+|------|------|------|
+| `rwx` | 7 (4+2+1) | 読み・書き・実行すべて可 |
+| `rw-` | 6 (4+2+0) | 読み・書き可、実行不可 |
+| `r--` | 4 (4+0+0) | 読み取りのみ |
+| `---` | 0 (0+0+0) | すべて不可 |
 
-urlpatterns = [
-    # LoginView：フォーム表示（GET）とログイン処理（POST）を両方やってくれる
-    path('login/', auth_views.LoginView.as_view(
-        template_name='accounts/login.html'
-    ), name='login'),
+例：`chmod 644 main.c` = `rw-r--r--`（所有者は読み書き、グループと他者は読み取りのみ）
 
-    # LogoutView：POST でセッションを破棄してリダイレクト
-    path('logout/', auth_views.LogoutView.as_view(), name='logout'),
-]
-```
-
-**なぜ LogoutView は POST なのか**：GET（リンクを踏むだけ）でログアウトできると、悪意のあるサイトからリンクを踏ませて強制ログアウトさせることができてしまう（CSRF 攻撃）。POST にすることで CSRF トークンが必要になり防げる。
-
----
-
-## 4. ログイン後・ログアウト後のリダイレクト先
-
-settings.py でリダイレクト先を設定する：
-
-```python
-LOGIN_URL = '/accounts/login/'           # 未認証ユーザーを送る先
-LOGIN_REDIRECT_URL = '/tasks/'           # ログイン成功後に送る先
-LOGOUT_REDIRECT_URL = '/accounts/login/' # ログアウト後に送る先
-```
-
----
-
-## 5. LoginRequiredMixin：ページへのアクセス制限
-
-ログインしていないユーザーを弾く仕組み。
-
-```python
-from django.contrib.auth.mixins import LoginRequiredMixin
-from django.views.generic import ListView
-
-class TaskListView(LoginRequiredMixin, ListView):
-    # LoginRequiredMixin は必ず最初（左側）に書く
-    ...
-```
-
-未認証ユーザーがアクセスすると、`settings.py` の `LOGIN_URL` に自動リダイレクトされる。ビューの中に `if not request.user.is_authenticated:` を自分で書く必要はない。
-
----
-
-## 6. テンプレートでのログイン状態の判定
-
-テンプレートの中では `user` という変数が自動的に使えるようになっている（Django が自動でコンテキストに追加する）。
-
-```html
-{% if user.is_authenticated %}
-    <!-- ログイン中のユーザーに見せる -->
-    <span>{{ user.username }} さん</span>
-    <form method="post" action="{% url 'accounts:logout' %}">
-        {% csrf_token %}
-        <button type="submit">ログアウト</button>
-    </form>
-{% else %}
-    <!-- 未ログインユーザーに見せる -->
-    <a href="{% url 'accounts:login' %}">ログイン</a>
-{% endif %}
-```
-
----
-
-## 7. ハンズオン
-
-### Step 1：ブランチを確認する
-
-Day 3 の `feature/user-auth` ブランチで引き続き作業する（まだマージしていない場合）。
+### `chmod`：パーミッションを変更する
 
 ```bash
-git checkout feature/user-auth
+# 数値表記
+chmod 644 main.c        # -rw-r--r--（ソースファイルの一般的な設定）
+chmod 755 build.sh      # -rwxr-xr-x（実行スクリプトの一般的な設定）
+chmod 600 secret.key    # -rw-------（秘密鍵など）
+
+# シンボル表記
+chmod +x build.sh       # 実行権限を追加
+chmod -w readonly.txt   # 書き込み権限を削除
+chmod u+x,g-w file      # 所有者に実行権限追加、グループから書き込み権限削除
+
+# ディレクトリを再帰的に変更
+chmod -R 755 projects/
 ```
 
-### Step 2：accounts/urls.py にログイン・ログアウトを追加する
-
-```python
-from django.contrib.auth import views as auth_views
-from django.urls import path
-from .views import RegisterView
-
-app_name = 'accounts'
-
-urlpatterns = [
-    path('register/', RegisterView.as_view(), name='register'),
-    path('login/', auth_views.LoginView.as_view(
-        template_name='accounts/login.html'
-    ), name='login'),
-    path('logout/', auth_views.LogoutView.as_view(), name='logout'),
-]
-```
-
-### Step 3：tasks スタブビューを作成する
-
-`LoginRequiredMixin` の動作確認のため、最小限のビュー・URL・テンプレートを用意する。
-
-`tasks/views.py` を以下の内容に書き換える：
-
-```python
-from django.contrib.auth.mixins import LoginRequiredMixin
-from django.views.generic import TemplateView
-
-
-class TaskListView(LoginRequiredMixin, TemplateView):
-    template_name = 'tasks/task_list.html'
-```
-
-`tasks/urls.py` を新規作成する：
-
-```python
-from django.urls import path
-from .views import TaskListView
-
-app_name = 'tasks'
-
-urlpatterns = [
-    path('', TaskListView.as_view(), name='task_list'),
-]
-```
-
-`config/urls.py` に tasks の URL を追加する：
-
-```python
-from django.contrib import admin
-from django.urls import path, include
-
-urlpatterns = [
-    path('admin/', admin.site.urls),
-    path('accounts/', include('accounts.urls')),
-    path('tasks/', include('tasks.urls')),   # 追加
-]
-```
-
-`templates/tasks/task_list.html` を新規作成する：
-
-```html
-{% extends 'base.html' %}
-
-{% block content %}
-<h2>タスク一覧（準備中）</h2>
-<p>Day 6 で本実装します。</p>
-{% endblock %}
-```
-
-### Step 4：settings.py にリダイレクト先を追加する
-
-`config/settings.py` の末尾に追記：
-
-```python
-LOGIN_URL = '/accounts/login/'
-LOGIN_REDIRECT_URL = '/tasks/'
-LOGOUT_REDIRECT_URL = '/accounts/login/'
-```
-
-### Step 5：ログインテンプレートを作成する
-
-`templates/accounts/login.html` を新規作成：
-
-```html
-{% extends 'base.html' %}
-
-{% block content %}
-<div class="row justify-content-center">
-    <div class="col-md-6">
-        <h2>ログイン</h2>
-        <form method="post">
-            {% csrf_token %}
-            {{ form.as_p }}
-            <button type="submit" class="btn btn-primary">ログイン</button>
-        </form>
-        <p class="mt-2">
-            アカウントをお持ちでない方は <a href="{% url 'accounts:register' %}">こちら</a>
-        </p>
-    </div>
-</div>
-{% endblock %}
-```
-
-### Step 6：base.html のナビバーを更新する
-
-`templates/base.html` の `<nav>` 部分を以下に置き換える：
-
-```html
-<nav class="navbar navbar-expand-lg navbar-dark bg-dark">
-    <div class="container">
-        <a class="navbar-brand" href="/">TaskBoard</a>
-        <div class="navbar-nav ms-auto">
-            {% if user.is_authenticated %}
-                <span class="navbar-text text-white me-3">{{ user.username }}</span>
-                <form method="post" action="{% url 'accounts:logout' %}" class="d-inline">
-                    {% csrf_token %}
-                    <button type="submit" class="btn btn-outline-light btn-sm">ログアウト</button>
-                </form>
-            {% else %}
-                <a class="nav-link" href="{% url 'accounts:login' %}">ログイン</a>
-                <a class="nav-link" href="{% url 'accounts:register' %}">登録</a>
-            {% endif %}
-        </div>
-    </div>
-</nav>
-```
-
-### Step 7：動作確認
-
-以下の順番でブラウザ確認する：
-
-1. `http://localhost:8000/accounts/login/` → ログインフォームが表示される
-2. Day 3 で作成したユーザーでログイン → `/tasks/` に「タスク一覧（準備中）」ページが表示される
-3. ナビバーにユーザー名が表示されている
-4. ログアウトボタンを押す → ログインページにリダイレクトされる
-5. ログインせずに `http://localhost:8000/tasks/` にアクセス → `http://localhost:8000/accounts/login/?next=/tasks/` にリダイレクトされる
-
-### Step 8：PR を作成してマージする
+### `chown`：所有者を変更する
 
 ```bash
-git add accounts/ templates/ tasks/ config/
-git commit -m "feat: ログイン・ログアウト・アクセス制御を実装"
-git push origin feature/user-auth
+chown user:group main.c         # 所有者とグループを変更
+chown user main.c               # 所有者だけ変更
+chown :group main.c             # グループだけ変更
+sudo chown -R user:user /opt/   # 再帰的に変更（root権限が必要）
 ```
 
-PR のコメントに動作確認のスクリーンショット（ログインページ・ナビバー）を添付してからマージする。
+### `sudo` と root の概念
+
+**root** はLinuxの最高権限ユーザー（WindowsのAdministratorに相当）。なんでもできる代わりに、誤操作が致命的になる。
+
+**sudo** は「一時的にroot権限で特定のコマンドを実行する」仕組み。
+
+```bash
+sudo apt install vim        # root権限で apt を実行
+sudo systemctl start nginx  # root権限でサービスを起動
+sudo vim /etc/hosts         # root権限でシステムファイルを編集
+```
+
+組み込み開発での典型的なパターン：
+
+```bash
+# デバイスファイルへのアクセスにsudoが必要な場合
+sudo ls -l /dev/ttyUSB0
+
+# 解決策：自分をdialoutグループに追加する（次回ログインから有効）
+sudo usermod -aG dialout user
+```
+
+### シンボリックリンク
+
+Windowsのショートカット（.lnkファイル）に相当するが、より透過的に機能する。
+
+```bash
+ln -s /usr/local/arm-gcc/bin/arm-linux-gnueabihf-gcc /usr/local/bin/arm-gcc
+# arm-gcc というコマンドで長いパスのツールを呼び出せるようになる
+```
+
+組み込み開発では、クロスコンパイラへのシンボリックリンクをよく使う。
+
+---
+
+## 2. `apt` パッケージ管理
+
+### パッケージ管理とは
+
+Windows では `.exe` や `.msi` ファイルを手動でダウンロードしてインストールする。Linuxでは**パッケージマネージャー（apt）**が依存関係も含めて自動的にインストール・管理する。
+
+```
+apt install vim
+  ↓
+apt: "vimはvim-commonにも依存している → 一緒にインストールしよう"
+  ↓
+必要なパッケージをすべて自動でインストール
+```
+
+### よく使う apt コマンド
+
+```bash
+# パッケージ一覧を更新（まず必ずこれ）
+sudo apt update
+
+# パッケージをインストール
+sudo apt install vim
+sudo apt install -y vim     # -y で確認プロンプトを省略
+
+# パッケージを削除
+sudo apt remove vim
+
+# 設定ファイルも含めて完全に削除
+sudo apt purge vim
+
+# インストール済みパッケージの更新
+sudo apt upgrade
+
+# パッケージを検索
+apt search "gcc"
+apt search --names-only "gcc"   # パッケージ名だけで検索
+
+# パッケージの詳細情報を表示
+apt show gcc
+
+# インストール済みパッケージを一覧表示
+apt list --installed
+apt list --installed | grep gcc
+```
+
+### 組み込み開発でよく使うパッケージ
+
+```bash
+# クロスコンパイラ（ARM向け）
+sudo apt install gcc-arm-linux-gnueabihf
+sudo apt install g++-arm-linux-gnueabihf
+
+# ビルドツール
+sudo apt install cmake make
+
+# デバッグツール
+sudo apt install gdb valgrind strace
+
+# 静的解析
+sudo apt install cppcheck
+
+# シリアル通信
+sudo apt install picocom minicom
+```
+
+---
+
+## 3. Git CLI（コマンドラインでのGit操作）
+
+### GUIクライアントからの移行
+
+Windowsでは GitKrakenや GitHub Desktop のGUIクライアントを使っていた場合、SSH接続先ではGUIが使えない。**コマンドラインでのGit操作が必須**になる。
+
+| GUIクライアントの操作 | git コマンド |
+|--------------------|-----------| 
+| リポジトリをクローン | `git clone URL` |
+| 変更をステージング | `git add ファイル名` |
+| コミット | `git commit -m "メッセージ"` |
+| プッシュ | `git push origin ブランチ名` |
+| プル | `git pull origin ブランチ名` |
+| ブランチ作成 | `git checkout -b ブランチ名` |
+| ブランチ切り替え | `git checkout ブランチ名` |
+| 差分確認 | `git diff` |
+| 状態確認 | `git status` |
+
+### 基本的なワークフロー
+
+```
+作業前                 作業中                   作業後
+──────────────────────────────────────────────────────
+git checkout -b        [ファイルを編集]         git add .
+feature/xxx                                     git commit -m "..."
+                                                git push origin feature/xxx
+```
+
+### SSH キーの設定（GitHub との接続）
+
+```bash
+# SSHキーを生成する
+ssh-keygen -t ed25519 -C "your-email@example.com"
+# パスフレーズは空欄でも可（Enter を2回）
+
+# 公開鍵を表示する（これをGitHubに登録する）
+cat ~/.ssh/id_ed25519.pub
+```
+
+表示されたテキスト（`ssh-ed25519 AAAA...` から始まる1行）を、GitHubの Settings → SSH and GPG keys → New SSH key に貼り付ける。
+
+```bash
+# 接続確認
+ssh -T git@github.com
+# 成功例：Hi username! You've successfully authenticated...
+```
+
+### よく使う git コマンド
+
+```bash
+# リポジトリの状態を確認する
+git status
+
+# 差分を確認する
+git diff                    # ステージング前の差分
+git diff --staged           # ステージング後の差分
+
+# 変更をステージングする
+git add main.c              # 特定のファイル
+git add src/                # ディレクトリ全体
+git add .                   # カレントディレクトリ以下すべて
+
+# コミットする
+git commit -m "feat: main 関数を実装"
+
+# リモートにプッシュする
+git push origin main
+git push origin feature/add-sensor    # ブランチ名を指定
+
+# 履歴を確認する
+git log                     # 詳細
+git log --oneline           # 1行表示
+git log --oneline --graph   # ブランチのグラフも表示
+
+# ブランチを操作する
+git branch                  # ブランチ一覧
+git checkout -b feature/xxx # ブランチを作成して切り替え
+git checkout main           # main ブランチに切り替え
+git branch -d feature/xxx   # ブランチを削除
+```
+
+### .gitignore の重要性
+
+ビルド成果物（`.o`, `.a`, `a.out` など）をGitで管理してはいけない。コンパイル環境が違うと動かないファイルであり、リポジトリが肥大化する原因になる。
+
+```bash
+# 組み込みC/C++開発用の .gitignore
+cat > ~/.gitignore_global << 'EOF'
+*.o
+*.a
+*.out
+*.elf
+*.bin
+*.hex
+build/
+.cache/
+EOF
+
+git config --global core.excludesfile ~/.gitignore_global
+```
+
+---
+
+## 4. ハンズオン
+
+### Step 1：作業ディレクトリを作成する
+
+```bash
+mkdir -p ~/training/day04
+cd ~/training/day04
+```
+
+### Step 2：パーミッションを確認・変更する
+
+```bash
+# テスト用ファイルを作成
+echo "#!/bin/bash" > test.sh
+echo "echo Hello" >> test.sh
+
+# 実行権限がないことを確認
+ls -l test.sh
+# -rw-rw-r-- 1 user user 20 Jan 1 10:00 test.sh
+
+# 実行しようとするとエラー
+./test.sh
+# bash: ./test.sh: Permission denied
+
+# 実行権限を追加
+chmod +x test.sh
+ls -l test.sh
+# -rwxrwxr-x 1 user user 20 Jan 1 10:00 test.sh
+
+# 実行できるようになる
+./test.sh
+# Hello
+```
+
+### Step 3：デバイスファイルのパーミッションを確認する
+
+```bash
+ls -l /dev/null /dev/zero /dev/random
+```
+
+出力例：
+
+```
+crw-rw-rw- 1 root root 1, 3 Jan 1 09:00 /dev/null
+crw-rw-rw- 1 root root 1, 5 Jan 1 09:00 /dev/zero
+crw-rw-rw- 1 root root 1, 8 Jan 1 09:00 /dev/random
+```
+
+`c` はキャラクタデバイスを表す（`b` はブロックデバイス）。
+
+### Step 4：パッケージを追加インストールする
+
+```bash
+# cppcheck（C/C++の静的解析ツール）をインストール
+sudo apt update
+sudo apt install -y cppcheck
+
+# インストール確認
+cppcheck --version
+
+# インストール済み確認
+apt list --installed | grep cppcheck
+```
+
+### Step 5：GitHubにSSHキーを設定する（まだの場合）
+
+```bash
+# SSHキーを生成
+ssh-keygen -t ed25519 -C "your-email@example.com"
+
+# 公開鍵を表示
+cat ~/.ssh/id_ed25519.pub
+```
+
+表示された内容をGitHubに登録し、接続確認：
+
+```bash
+ssh -T git@github.com
+```
+
+### Step 6：GitHubにリポジトリを作成してプッシュする
+
+1. GitHubで `linux-practice` リポジトリを作成（Public）
+2. ローカルのリポジトリをGitHubに接続する：
+
+```bash
+cd ~/training
+
+# リモートを追加（URLはGitHubのリポジトリページから確認）
+git remote add origin git@github.com:あなたのユーザー名/linux-practice.git
+
+# 現在の状態を確認
+git remote -v
+
+# プッシュ
+git push -u origin main
+```
+
+GitHubのリポジトリページを開いて、ファイルが反映されていれば成功。
+
+### Step 7：ブランチを切って作業する
+
+```bash
+# 新しいブランチを作成
+git checkout -b feature/day04-permission
+
+# ファイルを追加
+mkdir day04
+cp test.sh day04/
+
+# コミット
+git add day04/
+git commit -m "day04: パーミッションとGit CLIの実習を追加"
+
+# プッシュ
+git push origin feature/day04-permission
+```
+
+GitHubのリポジトリで Pull Request を作成できることを確認する。
 
 ---
 
@@ -299,42 +444,35 @@ PR のコメントに動作確認のスクリーンショット（ログイン�
 
 | エラー | 原因 | 対処 |
 |--------|------|------|
-| `NoReverseMatch: accounts:login` | URL の `app_name` が設定されていない | `accounts/urls.py` に `app_name = 'accounts'` を追加 |
-| ログアウトが GET でも動いてしまう | Django 5.x の設定 | `LogoutView` は POST のみ有効。`<form method="post">` で実装する |
-| ログイン後に `/accounts/profile/` に飛ぶ | `LOGIN_REDIRECT_URL` が未設定 | `settings.py` に `LOGIN_REDIRECT_URL = '/tasks/'` を追加 |
-| `403 Forbidden` | CSRF トークン漏れ | form タグの中に `{% csrf_token %}` が書かれているか確認 |
+| `Permission denied (publickey)` | SSHキーがGitHubに登録されていない or 鍵ファイルが見つからない | `cat ~/.ssh/id_ed25519.pub` の内容をGitHubに再登録する |
+| `git push` で `rejected` | リモートに自分より新しいコミットがある | `git pull --rebase origin main` で最新を取得してからpush |
+| `chmod: changing permissions of '...': Operation not permitted` | 他ユーザーのファイルのパーミッションを変更しようとした | `sudo chmod` を使う（root権限が必要） |
+| `sudo apt install` でロックエラー | 別の apt プロセスが実行中 | `sudo rm /var/lib/dpkg/lock-frontend` で解除（他のaptが終わるのを待つのが安全） |
+| `git status` で `fatal: not a git repository` | gitリポジトリ外でgitコマンドを実行した | `git init` でリポジトリを初期化するか、正しいディレクトリに移動する |
 
 ---
 
-## この日の GitHub チェックポイント
-
-> 詳細なルールは [github_flow.md](github_flow.md) を参照。
+## この日の Git チェックポイント
 
 ### いつブランチを切るか
 
-Day 3 の `feature/user-auth` ブランチを継続して使う。登録・ログイン・ログアウトは「認証機能」という1つのまとまりとして1ブランチで管理する。
+**タイミング**：機能や学習の単位ごとに切る。
 
-**理由**：「登録だけ動く状態」は機能として半完成。ログイン・ログアウトまで揃って初めて「認証機能が完成」と言える。途中でブランチを分けると「認証が半分しか動かない状態の PR」が生まれてしまう。
-
-### いつコミットするか
-
-| タイミング | コミットの意味 | 理由 |
-|-----------|--------------|------|
-| ログインフォームが表示されたとき | ログインページ完成 | URL・テンプレートの疎通確認ができた最小単位 |
-| ログイン → ログアウトの全フローが動いたとき | 認証フロー完成 | Day 4 のゴールが達成された状態 |
+```bash
+git checkout -b feature/day04-permission    # Day 4 の実習
+git checkout -b feature/add-sensor-driver   # センサードライバを追加する作業（OJT想定）
+```
 
 ### コミットメッセージ例
 
 ```bash
-git commit -m "feat: ログイン・ログアウト機能を実装"
-git commit -m "feat: ナビバーにログイン状態の表示を追加"
-
-# まとめる場合
-git commit -m "feat: 認証フロー（登録・ログイン・ログアウト）を完成"
+git commit -m "day04: パーミッションの基本操作を確認"
+git commit -m "day04: apt でcppcheckをインストール"
+git commit -m "day04: GitHubへのSSH接続を設定"
 ```
 
 ### いつ PR をマージするか
 
-**条件**：「登録 → ログイン → ログアウト」の全フローをブラウザで確認済みで、PR にスクリーンショットのコメントがあること。
+**条件**：その日のハンズオンが完了し、ファイルが正しくコミットされていること。
 
-**理由**：Day 5 以降のタスク機能には `LoginRequiredMixin` がかかる。ログインが壊れているとタスク一覧を一切確認できなくなり、機能の動作確認が常にログインページにリダイレクトされてしまう。
+GitHub でPRを作成し、変更内容を確認してからマージする。
